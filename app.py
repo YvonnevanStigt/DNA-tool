@@ -1,12 +1,3 @@
-Goed! Nu heel precies doen:
-
-Klik op het codeblok hieronder (de grijze balk met de code), dan verschijnt er rechtsboven in dat blokje een klein **kopieer-icoontje**. Klik daarop — dan kopieer je alleen de code en niets anders.
-
-Daarna plakken in GitHub met Ctrl+V.
-
-Zie je dat icoontje als je op de code hieronder klikt?
-
-```python
 import streamlit as st
 import io
 import csv
@@ -211,4 +202,3 @@ def toon_tool():
 
 if controleer_login():
     toon_tool()
-```
