@@ -3,6 +3,7 @@ import io
 import csv
 import re
 import urllib.request
+from datetime import date
 
 st.set_page_config(
     page_title="DNA Pathway Analyse",
@@ -12,46 +13,63 @@ st.set_page_config(
 
 SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSE1KrUOUJ8WDNAJ6PYZCxh1toMzUo6ObPQjPaEBO9KDcI6KFHGBpi6FB1aAw03HSUZEWydsGNayZje/pub?gid=0&single=true&output=csv"
 
-def laad_codes():
+def laad_gebruikers():
     try:
         with urllib.request.urlopen(SHEET_URL) as response:
             inhoud = response.read().decode("utf-8")
-        codes = []
+        gebruikers = {}
         for regel in inhoud.strip().splitlines():
-            code = regel.strip().strip('"').lower()
-            if code:
-                codes.append(code)
-        return codes
+            delen = regel.strip().split(",")
+            if len(delen) >= 2:
+                email = delen[0].strip().strip('"').lower()
+                verloopdatum = delen[1].strip().strip('"')
+                if email:
+                    gebruikers[email] = verloopdatum
+        return gebruikers
     except Exception:
-        return ["testcode123"]
+        return {"testcode123@test.nl": "2099-12-31"}
 
 def controleer_login():
     if st.session_state.get("ingelogd"):
         return True
+
     st.title("🧬 DNA Pathway Analyse")
     st.markdown("---")
-    st.subheader("Toegang met jouw persoonlijke code")
+    st.subheader("Inloggen met je e-mailadres")
     st.markdown(
-        "Je hebt een unieke toegangscode nodig om deze tool te gebruiken. "
-        "Ontvang je code via de cursus of via de beheerder."
+        "Vul het e-mailadres in waarmee je toegang hebt gekocht. "
+        "Heb je nog geen toegang? Neem contact op via de website."
     )
+
     col1, col2 = st.columns([3, 1])
     with col1:
-        ingevoerde_code = st.text_input(
-            "Toegangscode",
-            type="password",
-            placeholder="Vul hier je code in...",
+        ingevoerd_email = st.text_input(
+            "E-mailadres",
+            placeholder="jouw@emailadres.nl",
             label_visibility="collapsed"
         )
     with col2:
         inloggen = st.button("Inloggen", type="primary", use_container_width=True)
+
     if inloggen:
-        geldige_codes = laad_codes()
-        if ingevoerde_code.strip().lower() in geldige_codes:
-            st.session_state["ingelogd"] = True
-            st.rerun()
+        email = ingevoerd_email.strip().lower()
+        gebruikers = laad_gebruikers()
+
+        if email not in gebruikers:
+            st.error("❌ Dit e-mailadres heeft geen toegang.")
         else:
-            st.error("❌ Ongeldige code. Probeer het opnieuw.")
+            verloopdatum_str = gebruikers[email]
+            try:
+                verloopdatum = date.fromisoformat(verloopdatum_str)
+                if date.today() > verloopdatum:
+                    st.error(f"�expired Je toegang is verlopen op {verloopdatum.strftime('%d-%m-%Y')}. Neem contact op om je abonnement te verlengen.")
+                else:
+                    st.session_state["ingelogd"] = True
+                    st.session_state["email"] = email
+                    st.rerun()
+            except ValueError:
+                st.error("⚠️ Er is een fout in de verloopdatum. Neem contact op met de beheerder.")
+
     return False
 
 def clean_text(s):
@@ -142,21 +160,26 @@ def toon_tool():
         st.write("")
         if st.button("Uitloggen", use_container_width=True):
             st.session_state["ingelogd"] = False
+            st.session_state["email"] = ""
             st.rerun()
+
     st.markdown("---")
     st.markdown(
         "Upload je ruwe DNA-bestand en plak de RS-nummers die je wilt opzoeken. "
         "De tool zoekt exact op kolom 1 (rs4680 matcht **niet** op rs4680899)."
     )
+
     uploaded_file = st.file_uploader(
         "📂 Upload het ruwe DNA-bestand (.txt of .csv)",
         type=["txt", "csv"]
     )
+
     rs_tekst = st.text_area(
         "🔎 Plak hier de RS-nummers (elke opmaak werkt):",
         height=180,
         placeholder="rs4680\nrs1801131\nrs12069019, rs76698872\n..."
     )
+
     if st.button("🚀 Start Analyse", type="primary"):
         if not uploaded_file:
             st.error("⚠️ Upload eerst een DNA-bestand.")
@@ -174,25 +197,31 @@ def toon_tool():
             except Exception as e:
                 st.error(f"❌ Fout bij lezen van bestand: {e}")
                 return
+
         resultaten = []
         for rs in rs_lijst:
             if rs in gevonden:
                 resultaten.append({"RS-nummer": rs, "Gevonden": "✅", "Genotype": gevonden[rs]})
             else:
                 resultaten.append({"RS-nummer": rs, "Gevonden": "—", "Genotype": "Niet gevonden"})
+
         n_gevonden = sum(1 for r in resultaten if r["Gevonden"] == "✅")
         n_niet = len(resultaten) - n_gevonden
+
         col1, col2, col3 = st.columns(3)
         col1.metric("Gezocht", len(rs_lijst))
         col2.metric("Gevonden", n_gevonden)
         col3.metric("Niet gevonden", n_niet)
+
         st.success("✅ Analyse voltooid!")
         st.dataframe(resultaten, use_container_width=True, hide_index=True)
+
         csv_regels = ["RS-nummer,Gevonden,Genotype"]
         for r in resultaten:
             gevonden_str = "ja" if r["Gevonden"] == "✅" else "nee"
             csv_regels.append(f"{r['RS-nummer']},{gevonden_str},{r['Genotype']}")
         csv_tekst = "\n".join(csv_regels)
+
         st.download_button(
             label="⬇️ Download resultaten als CSV",
             data=csv_tekst.encode("utf-8"),
