@@ -13,7 +13,7 @@ st.set_page_config(
 
 SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSE1KrUOUJ8WDNAJ6PYZCxh1toMzUo6ObPQjPaEBO9KDcI6KFHGBpi6FB1aAw03HSUZEWydsGNayZje/pub?gid=0&single=true&output=csv"
 
-LOGO_URL = "https://raw.githubusercontent.com/YvonnevanStigt/DNA-tool/main/logo__3_.jpg"
+LOGO_URL = "https://raw.githubusercontent.com/YvonnevanStigt/DNA-tool/main/logo%20(3).jpg"
 
 def laad_gebruikers():
     try:
