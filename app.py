@@ -6,12 +6,14 @@ import urllib.request
 from datetime import date
 
 st.set_page_config(
-    page_title="DNA Pathway Analyse",
+    page_title="OPFG DNA Analyse Tool",
     page_icon="🧬",
     layout="centered"
 )
 
 SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSE1KrUOUJ8WDNAJ6PYZCxh1toMzUo6ObPQjPaEBO9KDcI6KFHGBpi6FB1aAw03HSUZEWydsGNayZje/pub?gid=0&single=true&output=csv"
+
+LOGO_URL = "https://raw.githubusercontent.com/YvonnevanStigt/DNA-tool/main/logo__3_.jpg"
 
 def laad_gebruikers():
     try:
@@ -33,7 +35,8 @@ def controleer_login():
     if st.session_state.get("ingelogd"):
         return True
 
-    st.title("🧬 DNA Pathway Analyse")
+    st.image(LOGO_URL, width=250)
+    st.title("OPFG DNA Analyse Tool")
     st.markdown("---")
     st.subheader("Inloggen met je e-mailadres")
     st.markdown(
@@ -51,10 +54,11 @@ def controleer_login():
     with col2:
         inloggen = st.button("Inloggen", type="primary", use_container_width=True)
 
+    st.info("🔒 Je DNA-bestand wordt alleen lokaal verwerkt in je browser en nooit opgeslagen of verstuurd naar een server.")
+
     if inloggen:
         email = ingevoerd_email.strip().lower()
         gebruikers = laad_gebruikers()
-
         if email not in gebruikers:
             st.error("❌ Dit e-mailadres heeft geen toegang.")
         else:
@@ -62,7 +66,7 @@ def controleer_login():
             try:
                 verloopdatum = date.fromisoformat(verloopdatum_str)
                 if date.today() > verloopdatum:
-                    st.error(f"�expired Je toegang is verlopen op {verloopdatum.strftime('%d-%m-%Y')}. Neem contact op om je abonnement te verlengen.")
+                    st.error(f"⚠️ Je toegang is verlopen op {verloopdatum.strftime('%d-%m-%Y')}. Neem contact op om je abonnement te verlengen.")
                 else:
                     st.session_state["ingelogd"] = True
                     st.session_state["email"] = email
@@ -153,9 +157,11 @@ def lees_dna_bestand(uploaded_file, gezochte_rs):
     return gevonden
 
 def toon_tool():
-    col_titel, col_logout = st.columns([5, 1])
+    col_logo, col_titel, col_logout = st.columns([1, 4, 1])
+    with col_logo:
+        st.image(LOGO_URL, width=80)
     with col_titel:
-        st.title("🧬 DNA Pathway Analyse")
+        st.title("OPFG DNA Analyse Tool")
     with col_logout:
         st.write("")
         if st.button("Uitloggen", use_container_width=True):
@@ -164,6 +170,7 @@ def toon_tool():
             st.rerun()
 
     st.markdown("---")
+    st.info("🔒 Je DNA-bestand wordt alleen lokaal verwerkt in je browser en nooit opgeslagen of verstuurd naar een server.")
     st.markdown(
         "Upload je ruwe DNA-bestand en plak de RS-nummers die je wilt opzoeken. "
         "De tool zoekt exact op kolom 1 (rs4680 matcht **niet** op rs4680899)."
