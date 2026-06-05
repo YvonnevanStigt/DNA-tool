@@ -171,10 +171,8 @@ def toon_tool():
 
     st.markdown("---")
     st.info("🔒 Je DNA-bestand wordt alleen lokaal verwerkt in je browser en nooit opgeslagen of verstuurd naar een server.")
-    st.markdown(
-       "📂 Upload het originele ruwe DNA-bestand (.txt of .csv). Let op: zet het bestand niet eerst om naar een ander formaat.",
-        "De tool zoekt exact op kolom 1 (rs4680 matcht **niet** op rs4680899)."
-    )
+        st.markdown("📂 Upload het originele ruwe DNA-bestand (.txt of .csv). Let op: zet het bestand niet eerst om naar een ander formaat.")
+        st.markdown("De tool zoekt exact op kolom 1 (rs4680 matcht **niet** op rs4680899).")
 
     uploaded_file = st.file_uploader(
         "📂 Upload het ruwe DNA-bestand (.txt of .csv)",
