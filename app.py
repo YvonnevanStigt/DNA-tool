@@ -12,7 +12,6 @@ st.set_page_config(
 )
 
 SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSE1KrUOUJ8WDNAJ6PYZCxh1toMzUo6ObPQjPaEBO9KDcI6KFHGBpi6FB1aAw03HSUZEWydsGNayZje/pub?gid=0&single=true&output=csv"
-
 LOGO_URL = "https://raw.githubusercontent.com/YvonnevanStigt/DNA-tool/main/logo%20(3).jpg"
 
 def laad_gebruikers():
@@ -22,14 +21,15 @@ def laad_gebruikers():
         gebruikers = {}
         for regel in inhoud.strip().splitlines():
             delen = regel.strip().split(",")
-            if len(delen) >= 2:
+            if len(delen) >= 3:
                 email = delen[0].strip().strip('"').lower()
-                verloopdatum = delen[1].strip().strip('"')
+                wachtwoord = delen[1].strip().strip('"')
+                verloopdatum = delen[2].strip().strip('"')
                 if email:
-                    gebruikers[email] = verloopdatum
+                    gebruikers[email] = {"wachtwoord": wachtwoord, "verloopdatum": verloopdatum}
         return gebruikers
     except Exception:
-        return {"testcode123@test.nl": "2099-12-31"}
+        return {"test@test.nl": {"wachtwoord": "test123", "verloopdatum": "2099-12-31"}}
 
 def controleer_login():
     if st.session_state.get("ingelogd"):
@@ -38,31 +38,26 @@ def controleer_login():
     st.image(LOGO_URL, width=250)
     st.title("OPFG DNA Analyse Tool")
     st.markdown("---")
-    st.subheader("Inloggen met je e-mailadres")
-    st.markdown(
-        "Vul het e-mailadres in waarmee je toegang hebt gekocht. "
-        "Heb je nog geen toegang? Neem contact op via de website."
-    )
+    st.subheader("Inloggen")
+    st.markdown("Vul het e-mailadres en wachtwoord in waarmee je toegang hebt gekocht. Heb je nog geen toegang? Neem contact op via de website.")
 
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        ingevoerd_email = st.text_input(
-            "E-mailadres",
-            placeholder="jouw@emailadres.nl",
-            label_visibility="collapsed"
-        )
-    with col2:
-        inloggen = st.button("Inloggen", type="primary", use_container_width=True)
+    ingevoerd_email = st.text_input("E-mailadres", placeholder="jouw@emailadres.nl")
+    ingevoerd_wachtwoord = st.text_input("Wachtwoord", type="password", placeholder="Jouw wachtwoord")
+    inloggen = st.button("Inloggen", type="primary")
 
     st.info("🔒 Je DNA-bestand wordt alleen lokaal verwerkt in je browser en nooit opgeslagen of verstuurd naar een server.")
 
     if inloggen:
         email = ingevoerd_email.strip().lower()
+        wachtwoord = ingevoerd_wachtwoord.strip()
         gebruikers = laad_gebruikers()
+
         if email not in gebruikers:
             st.error("❌ Dit e-mailadres heeft geen toegang.")
+        elif gebruikers[email]["wachtwoord"] != wachtwoord:
+            st.error("❌ Onjuist wachtwoord.")
         else:
-            verloopdatum_str = gebruikers[email]
+            verloopdatum_str = gebruikers[email]["verloopdatum"]
             try:
                 verloopdatum = date.fromisoformat(verloopdatum_str)
                 if date.today() > verloopdatum:
@@ -175,7 +170,7 @@ def toon_tool():
     st.markdown("De tool zoekt exact op kolom 1 (rs4680 matcht **niet** op rs4680899).")
 
     uploaded_file = st.file_uploader(
-        "📂 Upload het ruwe DNA-bestand (.txt of .csv)",
+        "Upload DNA-bestand",
         type=["txt", "csv"]
     )
 
