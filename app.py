@@ -136,7 +136,7 @@ def lees_dna_bestand(uploaded_file, gezochte_rs):
     if raw_bytes.startswith(b'\xff\xfe') or raw_bytes.startswith(b'\xfe\xff'):
         dna_tekst = raw_bytes.decode("utf-16", errors="ignore")
     else:
-        dna_tekst = raw_bytes.decode("utf-8-sig", errors="ignore")
+        dna_tekst = raw_bytes.decode("utf-8-sig", errors="ignore").replace('\r\n', '\n').replace('\r', '\n')
     gezochte_set = {clean_text(rs).lower() for rs in gezochte_rs if clean_text(rs)}
     gevonden = {}
     string_stroom = io.StringIO(dna_tekst)
