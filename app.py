@@ -2,6 +2,7 @@ import streamlit as st
 import io
 import csv
 import re
+import gzip
 import urllib.request
 from datetime import date
 
@@ -146,8 +147,7 @@ def lees_dna_bestand(uploaded_file, gezochte_rs):
     dna_tekst = dna_tekst.replace('\r\n', '\n').replace('\r', '\n')
     gezochte_set = {clean_text(rs).lower() for rs in gezochte_rs if clean_text(rs)}
     gevonden = {}
-    string_stroom = io.StringIO(dna_tekst)
-    for line in string_stroom:
+    for line in io.StringIO(dna_tekst):
         row = parse_line(line)
         if not row:
             continue
@@ -159,12 +159,18 @@ def lees_dna_bestand(uploaded_file, gezochte_rs):
     return gevonden
 
 def lees_vcf_bestand(uploaded_file, gezochte_rs):
-        uploaded_file.seek(0)
+    uploaded_file.seek(0)
     raw_bytes = uploaded_file.read()
-    dna_tekst = raw_bytes.decode("utf-8", errors="ignore")
     gezochte_set = {clean_text(rs).lower() for rs in gezochte_rs if clean_text(rs)}
     gevonden = {}
-    for line in io.StringIO(dna_tekst):
+    try:
+        if raw_bytes[:2] == b'\x1f\x8b':
+            tekst = gzip.decompress(raw_bytes).decode("utf-8", errors="ignore")
+        else:
+            tekst = raw_bytes.decode("utf-8", errors="ignore")
+    except Exception:
+        tekst = raw_bytes.decode("utf-8", errors="ignore")
+    for line in io.StringIO(tekst):
         if line.startswith("#"):
             continue
         delen = line.strip().split("\t")
@@ -250,7 +256,7 @@ def toon_tool():
     )
 
     if abonnement == "wgs":
-        tab1, tab2 = st.tabs(["📂 Normaal DNA-bestand (.txt / .csv)", "🧬 WGS Bestand (.vcf)"])
+        tab1, tab2 = st.tabs(["📂 Normaal DNA-bestand (.txt / .csv)", "🧬 WGS Bestand (.vcf / .vcf.gz)"])
 
         with tab1:
             st.markdown("Upload het originele ruwe DNA-bestand (.txt of .csv). Let op: zet het bestand niet eerst om naar een ander formaat.")
@@ -270,7 +276,7 @@ def toon_tool():
                         toon_resultaten(gevonden, rs_lijst)
 
         with tab2:
-            st.markdown("Upload je WGS VCF bestand (.vcf). Dit bestand mag maximaal 200MB zijn.")
+            st.markdown("Upload je WGS VCF bestand (.vcf of .vcf.gz). Dit bestand mag maximaal 200MB zijn.")
             uploaded_vcf = st.file_uploader("Upload VCF-bestand (.vcf of .vcf.gz)", type=["vcf", "gz"], key="vcf")
             if st.button("🚀 Start VCF Analyse", type="primary", key="start_vcf"):
                 if not uploaded_vcf:
