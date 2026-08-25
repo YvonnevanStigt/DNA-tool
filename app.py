@@ -159,7 +159,7 @@ def lees_dna_bestand(uploaded_file, gezochte_rs):
     return gevonden
 
 def lees_vcf_bestand(uploaded_file, gezochte_rs):
-    uploaded_file.seek(0)
+        uploaded_file.seek(0)
     raw_bytes = uploaded_file.read()
     dna_tekst = raw_bytes.decode("utf-8", errors="ignore")
     gezochte_set = {clean_text(rs).lower() for rs in gezochte_rs if clean_text(rs)}
