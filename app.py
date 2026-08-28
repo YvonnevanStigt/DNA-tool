@@ -361,15 +361,14 @@ def normaliseer_chromosoom(chrom):
     show_spinner=False,
     ttl=60 * 60 * 24 * 30
 )
-def rsid_naar_grch37(rs_id):
-    rs_id = clean_text(
-        rs_id
-    ).lower()
+@st.cache_data(
+    show_spinner=False,
+    ttl=60 * 60 * 24 * 30
+)
+def rsid_naar_grch37_ncbi(rs_id):
+    rs_id = clean_text(rs_id).lower()
 
-    if not re.fullmatch(
-        r"rs\d+",
-        rs_id
-    ):
+    if not re.fullmatch(r"rs\d+", rs_id):
         return None
 
     rs_nummer = rs_id[2:]
@@ -380,68 +379,52 @@ def rsid_naar_grch37(rs_id):
         + rs_nummer
     )
 
-    try:
-        req = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent":
-                "OPFG-DNA-Analyse-Tool/1.0"
-            }
-        )
-
-        with urllib.request.urlopen(
-            req,
-            timeout=20
-        ) as response:
-            data = json.loads(
-                response
-                .read()
-                .decode("utf-8")
+    for poging in range(2):
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": "OPFG-DNA-Analyse-Tool/1.0",
+                    "Accept": "application/json"
+                }
             )
 
-    except Exception:
-        return None
-
-    merged = data.get(
-        "merged_snapshot_data"
-    )
-
-    if merged:
-        merged_into = merged.get(
-            "merged_into",
-            []
-        )
-
-        if merged_into:
-            nieuw_rs = (
-                "rs"
-                + str(merged_into[0])
-            )
-
-            resultaat = rsid_naar_grch37(
-                nieuw_rs
-            )
-
-            if resultaat:
-                resultaat = dict(
-                    resultaat
+            with urllib.request.urlopen(
+                req,
+                timeout=20
+            ) as response:
+                data = json.loads(
+                    response.read().decode("utf-8")
                 )
 
-                resultaat[
-                    "requested_rsid"
-                ] = rs_id
+            break
 
-                resultaat[
-                    "resolved_rsid"
-                ] = nieuw_rs
+        except Exception:
+            data = None
+
+    if not data:
+        return None
+
+    merged = data.get("merged_snapshot_data")
+
+    if merged:
+        merged_into = merged.get("merged_into", [])
+
+        if merged_into:
+            nieuw_rs = "rs" + str(merged_into[0])
+
+            resultaat = rsid_naar_grch37(nieuw_rs)
+
+            if resultaat:
+                resultaat = dict(resultaat)
+                resultaat["requested_rsid"] = rs_id
+                resultaat["resolved_rsid"] = nieuw_rs
 
             return resultaat
 
         return None
 
-    primary = data.get(
-        "primary_snapshot_data"
-    )
+    primary = data.get("primary_snapshot_data")
 
     if not primary:
         return None
@@ -452,14 +435,9 @@ def rsid_naar_grch37(rs_id):
     )
 
     for placement in placements:
-        seq_id = placement.get(
-            "seq_id",
-            ""
-        )
+        seq_id = placement.get("seq_id", "")
 
-        chrom = GRCH37_CHROM_MAP.get(
-            seq_id
-        )
+        chrom = GRCH37_CHROM_MAP.get(seq_id)
 
         if not chrom:
             continue
@@ -476,10 +454,7 @@ def rsid_naar_grch37(rs_id):
 
         is_grch37 = any(
             str(
-                a.get(
-                    "assembly_name",
-                    ""
-                )
+                a.get("assembly_name", "")
             ).startswith("GRCh37")
             for a in assemblies
         )
@@ -496,18 +471,8 @@ def rsid_naar_grch37(rs_id):
 
         for allele_info in alleles:
             try:
-                spdi = (
-                    allele_info[
-                        "allele"
-                    ][
-                        "spdi"
-                    ]
-                )
-
-                spdis.append(
-                    spdi
-                )
-
+                spdi = allele_info["allele"]["spdi"]
+                spdis.append(spdi)
             except Exception:
                 continue
 
@@ -515,9 +480,7 @@ def rsid_naar_grch37(rs_id):
             continue
 
         positions = {
-            int(
-                spdi["position"]
-            )
+            int(spdi["position"])
             for spdi in spdis
             if "position" in spdi
         }
@@ -525,10 +488,7 @@ def rsid_naar_grch37(rs_id):
         if not positions:
             continue
 
-        pos_vcf = (
-            min(positions)
-            + 1
-        )
+        pos_vcf = min(positions) + 1
 
         ref = ""
         alts = []
@@ -558,9 +518,7 @@ def rsid_naar_grch37(rs_id):
                 inserted != deleted
                 and inserted not in alts
             ):
-                alts.append(
-                    inserted
-                )
+                alts.append(inserted)
 
         if not ref:
             ref = str(
@@ -577,7 +535,149 @@ def rsid_naar_grch37(rs_id):
             "pos": pos_vcf,
             "ref": ref,
             "alts": alts,
+            "bron": "NCBI"
         }
+
+    return None
+
+
+def rsid_naar_grch37_ensembl(rs_id):
+    rs_id = clean_text(rs_id).lower()
+
+    if not re.fullmatch(r"rs\d+", rs_id):
+        return None
+
+    url = (
+        "https://grch37.rest.ensembl.org/"
+        "variation/human/"
+        + rs_id
+        + "?content-type=application/json"
+    )
+
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "OPFG-DNA-Analyse-Tool/1.0",
+                "Accept": "application/json",
+                "Content-Type": "application/json"
+            }
+        )
+
+        with urllib.request.urlopen(
+            req,
+            timeout=20
+        ) as response:
+            data = json.loads(
+                response.read().decode("utf-8")
+            )
+
+    except Exception:
+        return None
+
+    mappings = data.get("mappings", [])
+
+    if not mappings:
+        return None
+
+    geldige_chromosomen = {
+        str(i) for i in range(1, 23)
+    } | {"X", "Y", "MT", "M"}
+
+    for mapping in mappings:
+        chrom = str(
+            mapping.get(
+                "seq_region_name",
+                ""
+            )
+        ).upper()
+
+        if chrom.startswith("CHR"):
+            chrom = chrom[3:]
+
+        if chrom == "M":
+            chrom = "MT"
+
+        if chrom not in geldige_chromosomen:
+            continue
+
+        assembly = str(
+            mapping.get(
+                "assembly_name",
+                ""
+            )
+        )
+
+        if (
+            assembly
+            and not assembly.startswith("GRCh37")
+        ):
+            continue
+
+        try:
+            pos = int(
+                mapping.get("start")
+            )
+        except (TypeError, ValueError):
+            continue
+
+        allele_string = str(
+            mapping.get(
+                "allele_string",
+                ""
+            )
+        ).upper()
+
+        alleles = [
+            a.strip()
+            for a in allele_string.split("/")
+            if a.strip()
+        ]
+
+        ref = (
+            alleles[0]
+            if alleles
+            else ""
+        )
+
+        alts = []
+
+        for allele in alleles[1:]:
+            if allele not in alts:
+                alts.append(allele)
+
+        return {
+            "requested_rsid": rs_id,
+            "resolved_rsid": rs_id,
+            "chrom": chrom,
+            "pos": pos,
+            "ref": ref,
+            "alts": alts,
+            "bron": "Ensembl"
+        }
+
+    return None
+
+
+@st.cache_data(
+    show_spinner=False,
+    ttl=60 * 60 * 24 * 30
+)
+def rsid_naar_grch37(rs_id):
+    rs_id = clean_text(rs_id).lower()
+
+    if not re.fullmatch(r"rs\d+", rs_id):
+        return None
+
+    resultaat = rsid_naar_grch37_ncbi(rs_id)
+
+    if resultaat:
+        return resultaat
+
+    resultaat = rsid_naar_grch37_ensembl(rs_id)
+
+    if resultaat:
+        return resultaat
 
     return None
 
