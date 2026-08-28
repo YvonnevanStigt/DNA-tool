@@ -277,7 +277,7 @@ def toon_tool():
 
         with tab2:
             st.markdown("Upload je WGS VCF bestand (.vcf of .vcf.gz). Dit bestand mag maximaal 200MB zijn.")
-            uploaded_vcf = st.file_uploader("Upload VCF-bestand (.vcf of .vcf.gz)", type=["vcf", "gz"], key="vcf")
+            uploaded_vcf = st.file_uploader("Upload VCF-bestand (.vcf of .vcf.gz)", type=None, key="vcf")
             if st.button("🚀 Start VCF Analyse", type="primary", key="start_vcf"):
                 if not uploaded_vcf:
                     st.error("⚠️ Upload eerst een VCF bestand.")
