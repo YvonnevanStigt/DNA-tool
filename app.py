@@ -5,6 +5,7 @@ import re
 import gzip
 import json
 import urllib.request
+import urllib.parse
 from datetime import date
 
 st.set_page_config(
@@ -15,6 +16,7 @@ st.set_page_config(
 
 SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSE1KrUOUJ8WDNAJ6PYZCxh1toMzUo6ObPQjPaEBO9KDcI6KFHGBpi6FB1aAw03HSUZEWydsGNayZje/pub?gid=0&single=true&output=csv"
 LOGO_URL = "https://raw.githubusercontent.com/YvonnevanStigt/DNA-tool/main/logo%20(3).jpg"
+ENSEMBL_GRCH37 = "https://grch37.rest.ensembl.org"
 
 
 def laad_gebruikers():
@@ -357,10 +359,6 @@ def normaliseer_chromosoom(chrom):
     return chrom
 
 
-@st.cache_data(
-    show_spinner=False,
-    ttl=60 * 60 * 24 * 30
-)
 @st.cache_data(
     show_spinner=False,
     ttl=60 * 60 * 24 * 30
@@ -966,6 +964,281 @@ def lees_vcf_bestand(
     )
 
 
+
+# ============================================================
+# WGS GEN-ANALYSE
+# ============================================================
+
+SPLICE_TERMS = {"splice_acceptor_variant", "splice_donor_variant", "splice_region_variant"}
+MISSENSE_TERMS = {"missense_variant"}
+SYNONYMOUS_TERMS = {"synonymous_variant"}
+OTHER_CODING_TERMS = {
+    "transcript_ablation", "stop_gained", "frameshift_variant", "stop_lost",
+    "start_lost", "transcript_amplification", "inframe_insertion", "inframe_deletion",
+    "protein_altering_variant", "incomplete_terminal_codon_variant",
+    "start_retained_variant", "stop_retained_variant", "coding_sequence_variant"
+}
+CODING_TERMS = SPLICE_TERMS | MISSENSE_TERMS | SYNONYMOUS_TERMS | OTHER_CODING_TERMS
+UTR_TERMS = {"5_prime_UTR_variant", "3_prime_UTR_variant"}
+
+
+def haal_genen_uit_invoer(tekst):
+    gezien, genen = set(), []
+    for gen in re.findall(r"[A-Za-z0-9][A-Za-z0-9._-]*", tekst):
+        gen = gen.upper().strip()
+        if gen and gen not in gezien:
+            gezien.add(gen)
+            genen.append(gen)
+    return genen
+
+
+def http_json_get(url, timeout=25):
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "OPFG-DNA-Analyse-Tool/2.1",
+        "Accept": "application/json"
+    })
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def http_json_post(url, payload, timeout=90):
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={
+            "User-Agent": "OPFG-DNA-Analyse-Tool/2.1",
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+        }
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 24 * 30)
+def haal_genregio_grch37(gen):
+    gen = clean_text(gen).upper()
+    url = (
+        f"{ENSEMBL_GRCH37}/lookup/symbol/homo_sapiens/"
+        + urllib.parse.quote(gen)
+        + "?content-type=application/json"
+    )
+    try:
+        d = http_json_get(url, 25)
+        return {
+            "gene": gen,
+            "chrom": normaliseer_chromosoom(d["seq_region_name"]),
+            "start": int(d["start"]),
+            "end": int(d["end"]),
+            "strand": int(d.get("strand", 0)),
+        }
+    except Exception:
+        return None
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 24 * 30)
+def haal_regulatory_features(chrom, start, end):
+    regio = urllib.parse.quote(f"{chrom}:{start}-{end}", safe=":-")
+    url = (
+        f"{ENSEMBL_GRCH37}/overlap/region/homo_sapiens/{regio}"
+        "?feature=regulatory;content-type=application/json"
+    )
+    try:
+        data = http_json_get(url, 30)
+    except Exception:
+        return []
+    features = []
+    for x in data if isinstance(data, list) else []:
+        try:
+            features.append({
+                "id": x.get("id", ""),
+                "start": int(x["start"]),
+                "end": int(x["end"]),
+                "description": x.get("description") or x.get("feature_type") or x.get("biotype") or "regulatory",
+            })
+        except Exception:
+            pass
+    return features
+
+
+def genotype_en_gt_uit_vcf(delen):
+    ref, alt = delen[3].upper(), delen[4].upper()
+    allelen = [ref] + alt.split(",")
+    if len(delen) < 10:
+        return "", "", [], allelen
+    fmt, sample = delen[8].split(":"), delen[9].split(":")
+    try:
+        gt = sample[fmt.index("GT")]
+    except Exception:
+        gt = sample[0] if sample else ""
+    if gt in {"", ".", "./.", ".|."}:
+        return "", gt, [], allelen
+    indices, vals = [], []
+    try:
+        for s in re.split(r"[/|]", gt):
+            if s == ".":
+                continue
+            i = int(s)
+            indices.append(i)
+            if 0 <= i < len(allelen):
+                vals.append(allelen[i])
+            else:
+                return gt, gt, indices, allelen
+    except Exception:
+        return gt, gt, indices, allelen
+    genotype = "".join(vals) if vals and all(len(v) == 1 for v in vals) else "/".join(vals)
+    return genotype, gt, indices, allelen
+
+
+def scan_genregios(uploaded_file, genen, flank=5000):
+    gebieden, niet_gevonden = [], []
+    for gen in genen:
+        g = haal_genregio_grch37(gen)
+        if not g:
+            niet_gevonden.append(gen)
+            continue
+        g = dict(g)
+        g["scan_start"] = max(1, g["start"] - flank)
+        g["scan_end"] = g["end"] + flank
+        g["regulatory"] = haal_regulatory_features(g["chrom"], g["scan_start"], g["scan_end"])
+        gebieden.append(g)
+
+    per_chrom = {}
+    for g in gebieden:
+        per_chrom.setdefault(g["chrom"], []).append(g)
+
+    kandidaten, no_calls = [], 0
+    uploaded_file.seek(0)
+    for line in iter_vcf_regels(uploaded_file):
+        if not line or line.startswith("#"):
+            continue
+        d = line.rstrip("\r\n").split("\t")
+        if len(d) < 5:
+            continue
+        chrom = normaliseer_chromosoom(d[0])
+        if chrom not in per_chrom:
+            continue
+        try:
+            pos = int(d[1])
+        except ValueError:
+            continue
+        genotype, gt, indices, allelen = genotype_en_gt_uit_vcf(d)
+        if not indices:
+            if gt in {".", "./.", ".|."}:
+                no_calls += 1
+            continue
+        if all(i == 0 for i in indices):
+            continue
+        called_alt_indices = sorted({i for i in indices if 0 < i < len(allelen)})
+        if not called_alt_indices:
+            continue
+        for g in per_chrom[chrom]:
+            if not (g["scan_start"] <= pos <= g["scan_end"]):
+                continue
+            reg_hits = []
+            for f in g["regulatory"]:
+                if f["start"] <= pos <= f["end"]:
+                    label = str(f["description"])
+                    if f["id"]:
+                        label += f" ({f['id']})"
+                    reg_hits.append(label)
+            for alt_index in called_alt_indices:
+                kandidaten.append({
+                    "gene": g["gene"], "chrom": chrom, "pos": pos,
+                    "vcf_id": d[2], "ref": d[3].upper(), "alt": allelen[alt_index],
+                    "genotype": genotype, "regulatory_hits": reg_hits,
+                })
+    return kandidaten, niet_gevonden, no_calls
+
+
+def vep_annotaties(kandidaten):
+    uniq = {(k["chrom"], k["pos"], k["ref"], k["alt"]): k for k in kandidaten}
+    keys, out, batch_size = list(uniq), {}, 150
+    for start in range(0, len(keys), batch_size):
+        batch = keys[start:start + batch_size]
+        variants = [f"{c} {p} . {r} {a} . . ." for c, p, r, a in batch]
+        url = (
+            f"{ENSEMBL_GRCH37}/vep/homo_sapiens/region"
+            "?canonical=1;hgvs=1;protein=1;numbers=1;variant_class=1;content-type=application/json"
+        )
+        try:
+            data = http_json_post(url, {"variants": variants}, 90)
+        except Exception:
+            data = []
+        for item in data if isinstance(data, list) else []:
+            parts = str(item.get("input", "")).split()
+            if len(parts) >= 5:
+                try:
+                    key = (normaliseer_chromosoom(parts[0]), int(parts[1]), parts[3].upper(), parts[4].upper())
+                    out[key] = item
+                except Exception:
+                    pass
+    return out
+
+
+def bepaal_categorieen(terms, regulatory_hits):
+    cats = []
+    if any(t in SPLICE_TERMS for t in terms): cats.append("splice")
+    if any(t in MISSENSE_TERMS for t in terms): cats.append("missense")
+    if any(t in SYNONYMOUS_TERMS for t in terms): cats.append("synonymous")
+    if any(t in OTHER_CODING_TERMS for t in terms): cats.append("coding")
+    if any(t in UTR_TERMS for t in terms): cats.append("UTR")
+    reg = " ".join(regulatory_hits).lower()
+    if "promoter" in reg: cats.append("promoter")
+    if "enhancer" in reg: cats.append("enhancer")
+    if regulatory_hits and "promoter" not in reg and "enhancer" not in reg: cats.append("regulatoir")
+    return list(dict.fromkeys(cats))
+
+
+def bouw_gen_resultaten(kandidaten, annotaties):
+    rows = []
+    for k in kandidaten:
+        item = annotaties.get((k["chrom"], k["pos"], k["ref"], k["alt"]), {})
+        terms, hgvs, transcripts = [], [], []
+        for tc in item.get("transcript_consequences", []) or []:
+            gene_symbol = str(tc.get("gene_symbol", "")).upper()
+            if gene_symbol and gene_symbol != k["gene"]:
+                continue
+            rel = set(tc.get("consequence_terms", []) or []) & (CODING_TERMS | UTR_TERMS)
+            if not rel:
+                continue
+            terms.extend(sorted(rel))
+            if tc.get("hgvsc"): hgvs.append(str(tc["hgvsc"]))
+            if tc.get("hgvsp"): hgvs.append(str(tc["hgvsp"]))
+            if tc.get("transcript_id"): transcripts.append(str(tc["transcript_id"]))
+        terms = list(dict.fromkeys(terms))
+        hgvs = list(dict.fromkeys(hgvs))
+        transcripts = list(dict.fromkeys(transcripts))
+        if not terms and not k["regulatory_hits"]:
+            continue
+        rsids = []
+        for cv in item.get("colocated_variants", []) or []:
+            cid = str(cv.get("id", ""))
+            if re.fullmatch(r"rs\d+", cid, re.I):
+                rsids.append(cid.lower())
+        rs = ", ".join(dict.fromkeys(rsids))
+        if not rs and re.fullmatch(r"rs\d+", str(k["vcf_id"]), re.I):
+            rs = str(k["vcf_id"]).lower()
+        rows.append({
+            "Gen": k["gene"], "RS-nummer": rs or "—", "Chr": k["chrom"],
+            "Positie GRCh37": k["pos"], "Genotype": k["genotype"], "REF": k["ref"], "ALT": k["alt"],
+            "Categorie": " + ".join(bepaal_categorieen(terms, k["regulatory_hits"])),
+            "Consequence": ", ".join(terms), "HGVS": " | ".join(hgvs),
+            "Transcript": ", ".join(transcripts), "Regulatory feature": "; ".join(k["regulatory_hits"]),
+        })
+    rows.sort(key=lambda r: (r["Gen"], r["Chr"], int(r["Positie GRCh37"])))
+    return rows
+
+
+def gen_resultaten_naar_csv(resultaten):
+    output = io.StringIO()
+    velden = ["Gen", "RS-nummer", "Chr", "Positie GRCh37", "Genotype", "REF", "ALT", "Categorie", "Consequence", "HGVS", "Transcript", "Regulatory feature"]
+    writer = csv.DictWriter(output, fieldnames=velden)
+    writer.writeheader()
+    writer.writerows(resultaten)
+    return output.getvalue()
+
 def toon_resultaten(
     gevonden,
     rs_lijst,
@@ -1035,7 +1308,7 @@ def toon_resultaten(
 
     st.dataframe(
         resultaten,
-        use_container_width=True,
+        width="stretch",
         hide_index=True
     )
 
@@ -1085,353 +1358,147 @@ def toon_resultaten(
 
 
 def toon_tool():
-    col_logo, col_titel, col_logout = (
-        st.columns(
-            [1, 4, 1]
-        )
-    )
-
+    col_logo, col_titel, col_logout = st.columns([1, 4, 1])
     with col_logo:
-        st.image(
-            LOGO_URL,
-            width=80
-        )
-
+        st.image(LOGO_URL, width=80)
     with col_titel:
-        st.title(
-            "OPFG DNA Analyse Tool"
-        )
-
+        st.title("OPFG DNA Analyse Tool")
     with col_logout:
         st.write("")
-
-        if st.button(
-            "Uitloggen",
-            use_container_width=True
-        ):
-            st.session_state[
-                "ingelogd"
-            ] = False
-
-            st.session_state[
-                "email"
-            ] = ""
-
-            st.session_state[
-                "abonnement"
-            ] = ""
-
+        if st.button("Uitloggen", width="stretch"):
+            st.session_state["ingelogd"] = False
+            st.session_state["email"] = ""
+            st.session_state["abonnement"] = ""
             st.rerun()
 
-    abonnement = (
-        st.session_state.get(
-            "abonnement",
-            "basis"
-        )
-    )
-
+    abonnement = st.session_state.get("abonnement", "basis")
     st.markdown("---")
-
-    st.info(
-        "🔒 Je DNA-bestand wordt alleen gebruikt voor deze analyse "
-        "en wordt door de tool niet blijvend opgeslagen."
-    )
-
-    rs_tekst = st.text_area(
-        "🔎 Plak hier de RS-nummers (elke opmaak werkt):",
-        height=180,
-        placeholder=(
-            "rs4680\n"
-            "rs1801131\n"
-            "rs12069019, rs76698872\n"
-            "..."
-        )
-    )
+    st.info("🔒 Je DNA-bestand wordt alleen gebruikt voor deze analyse en wordt door de tool niet blijvend opgeslagen.")
 
     if abonnement == "wgs":
-        tab1, tab2 = st.tabs(
-            [
-                "📂 Normaal DNA-bestand (.txt / .csv)",
-                "🧬 WGS Bestand (.vcf / .vcf.gz)"
-            ]
-        )
+        tab1, tab2, tab3 = st.tabs([
+            "📂 Normaal DNA",
+            "🧬 WGS – RS-nummers",
+            "🧬 WGS – Gen-analyse",
+        ])
 
         with tab1:
-            st.markdown(
-                "Upload het originele ruwe DNA-bestand (.txt of .csv). "
-                "Let op: zet het bestand niet eerst om naar een ander formaat."
-            )
-
-            uploaded_file = (
-                st.file_uploader(
-                    "Upload DNA-bestand",
-                    type=[
-                        "txt",
-                        "csv"
-                    ],
-                    key="normaal"
-                )
-            )
-
-            if st.button(
-                "🚀 Start Analyse",
-                type="primary",
-                key="start_normaal"
-            ):
+            st.subheader("RS-nummers zoeken in normaal DNA-bestand")
+            rs_tekst = st.text_area("🔎 Plak hier de RS-nummers:", height=180, key="rs_normaal_wgs")
+            uploaded_file = st.file_uploader("Upload DNA-bestand", type=["txt", "csv"], key="normaal")
+            if st.button("🚀 Start Analyse", type="primary", key="start_normaal"):
                 if not uploaded_file:
-                    st.error(
-                        "⚠️ Upload eerst een DNA-bestand."
-                    )
-
+                    st.error("⚠️ Upload eerst een DNA-bestand.")
                 elif not rs_tekst.strip():
-                    st.error(
-                        "⚠️ Plak eerst RS-nummers."
-                    )
-
+                    st.error("⚠️ Plak eerst RS-nummers.")
                 else:
-                    rs_lijst = (
-                        haal_rs_nummers_uit_invoer(
-                            rs_tekst
-                        )
-                    )
-
+                    rs_lijst = haal_rs_nummers_uit_invoer(rs_tekst)
                     if not rs_lijst:
-                        st.error(
-                            "⚠️ Geen geldige RS-nummers herkend."
-                        )
-
+                        st.error("⚠️ Geen geldige RS-nummers herkend.")
                     else:
-                        with st.spinner(
-                            f"🔬 {len(rs_lijst)} "
-                            "RS-nummers opzoeken..."
-                        ):
-                            gevonden = (
-                                lees_dna_bestand(
-                                    uploaded_file,
-                                    rs_lijst
-                                )
-                            )
-
-                        toon_resultaten(
-                            gevonden,
-                            rs_lijst,
-                            wgs=False
-                        )
+                        with st.spinner(f"🔬 {len(rs_lijst)} RS-nummers opzoeken..."):
+                            gevonden = lees_dna_bestand(uploaded_file, rs_lijst)
+                        toon_resultaten(gevonden, rs_lijst, wgs=False)
 
         with tab2:
-            st.markdown(
-                "Upload je WGS VCF-bestand (`.vcf` of `.vcf.gz`). "
-                "Gebruik bij voorkeur het originele `.vcf.gz`-bestand; "
-                "uitpakken is niet nodig."
-            )
-
-            st.info(
-                "ℹ️ De WGS-tool zoekt de ingevoerde RS-nummers via hun "
-                "GRCh37-chromosoompositie op in het VCF-bestand."
-            )
-
-            uploaded_vcf = (
-                st.file_uploader(
-                    "Upload WGS-bestand (.vcf of .vcf.gz)",
-                    type=[
-                        "vcf",
-                        "gz"
-                    ],
-                    key="vcf"
-                )
-            )
-
-            if st.button(
-                "🚀 Start VCF Analyse",
-                type="primary",
-                key="start_vcf"
-            ):
+            st.subheader("RS-nummers zoeken in WGS")
+            st.markdown("Upload je WGS VCF-bestand (`.vcf` of `.vcf.gz`). Gebruik bij voorkeur het originele `.vcf.gz`-bestand; uitpakken is niet nodig.")
+            st.info("ℹ️ Deze route gebruik je als je al weet welke RS-nummers je wilt onderzoeken.")
+            rs_tekst = st.text_area("🔎 Plak hier de RS-nummers:", height=180, key="rs_wgs")
+            uploaded_vcf = st.file_uploader("Upload WGS-bestand (.vcf of .vcf.gz)", type=["vcf", "gz"], key="vcf_rs")
+            if st.button("🚀 Start VCF Analyse", type="primary", key="start_vcf"):
                 if not uploaded_vcf:
-                    st.error(
-                        "⚠️ Upload eerst een VCF- of VCF.GZ-bestand."
-                    )
-
+                    st.error("⚠️ Upload eerst een VCF- of VCF.GZ-bestand.")
                 elif not rs_tekst.strip():
-                    st.error(
-                        "⚠️ Plak eerst RS-nummers."
-                    )
-
+                    st.error("⚠️ Plak eerst RS-nummers.")
                 else:
-                    rs_lijst = (
-                        haal_rs_nummers_uit_invoer(
-                            rs_tekst
-                        )
-                    )
-
+                    rs_lijst = haal_rs_nummers_uit_invoer(rs_tekst)
                     if not rs_lijst:
-                        st.error(
-                            "⚠️ Geen geldige RS-nummers herkend."
-                        )
-
+                        st.error("⚠️ Geen geldige RS-nummers herkend.")
                     else:
-                        with st.spinner(
-                            f"🧬 {len(rs_lijst)} RS-nummers "
-                            "omzetten naar GRCh37 en opzoeken in WGS..."
-                        ):
-                            (
-                                gevonden,
-                                niet_omgezet,
-                                mapping_info
-                            ) = lees_vcf_bestand(
-                                uploaded_vcf,
-                                rs_lijst
-                            )
-
-                        toon_resultaten(
-                            gevonden,
-                            rs_lijst,
-                            wgs=True
-                        )
-
+                        with st.spinner(f"🧬 {len(rs_lijst)} RS-nummers omzetten naar GRCh37 en opzoeken in WGS..."):
+                            gevonden, niet_omgezet, mapping_info = lees_vcf_bestand(uploaded_vcf, rs_lijst)
+                        toon_resultaten(gevonden, rs_lijst, wgs=True)
                         if niet_omgezet:
-                            st.warning(
-                                "Voor deze RS-nummers kon via NCBI geen "
-                                "GRCh37-positie worden bepaald: "
-                                + ", ".join(
-                                    niet_omgezet
-                                )
-                            )
-
-                        with st.expander(
-                            "🔎 Toon gebruikte GRCh37-posities"
-                        ):
+                            st.warning("Voor deze RS-nummers kon via NCBI én Ensembl geen GRCh37-positie worden bepaald: " + ", ".join(niet_omgezet))
+                        with st.expander("🔎 Toon gebruikte GRCh37-posities"):
                             mapping_tabel = []
-
                             for rs in rs_lijst:
-                                info = (
-                                    mapping_info.get(
-                                        rs
-                                    )
-                                )
-
+                                info = mapping_info.get(rs)
                                 if not info:
-                                    mapping_tabel.append(
-                                        {
-                                            "RS-nummer": rs,
-                                            "Chromosoom": "",
-                                            "GRCh37 positie": "",
-                                            "REF": "",
-                                            "ALT": "",
-                                            "Status":
-                                            "Niet omgezet"
-                                        }
-                                    )
-
+                                    mapping_tabel.append({"RS-nummer": rs, "Chromosoom": "", "GRCh37 positie": "", "REF": "", "ALT": "", "Bron": "", "Status": "Niet omgezet"})
                                     continue
+                                resolved = info.get("resolved_rsid", rs)
+                                mapping_tabel.append({
+                                    "RS-nummer": rs,
+                                    "Chromosoom": info["chrom"],
+                                    "GRCh37 positie": info["pos"],
+                                    "REF": info.get("ref", ""),
+                                    "ALT": ", ".join(info.get("alts", [])),
+                                    "Bron": info.get("bron", ""),
+                                    "Status": f"Samengevoegd naar {resolved}" if resolved != rs else "OK",
+                                })
+                            st.dataframe(mapping_tabel, width="stretch", hide_index=True)
 
-                                resolved = (
-                                    info.get(
-                                        "resolved_rsid",
-                                        rs
-                                    )
-                                )
-
-                                status = (
-                                    f"Samengevoegd naar {resolved}"
-                                    if resolved != rs
-                                    else "OK"
-                                )
-
-                                mapping_tabel.append(
-                                    {
-                                        "RS-nummer":
-                                        rs,
-                                        "Chromosoom":
-                                        info["chrom"],
-                                        "GRCh37 positie":
-                                        info["pos"],
-                                        "REF":
-                                        info.get(
-                                            "ref",
-                                            ""
-                                        ),
-                                        "ALT":
-                                        ", ".join(
-                                            info.get(
-                                                "alts",
-                                                []
-                                            )
-                                        ),
-                                        "Status":
-                                        status
-                                    }
-                                )
-
-                            st.dataframe(
-                                mapping_tabel,
-                                use_container_width=True,
-                                hide_index=True
-                            )
+        with tab3:
+            st.subheader("Gen-analyse WGS")
+            st.markdown("Gebruik deze route als je wilt onderzoeken welke relevante varianten in één of meer genen aanwezig zijn, ook als je de RS-nummers nog niet kent.")
+            st.info("ℹ️ De tool zoekt in het gen en standaard 5 kb eromheen en toont coding-, splice-, missense-, synonymous-, UTR-, promoter- en enhancer-hits. Ook varianten zonder RS-nummer kunnen worden gevonden.")
+            gen_tekst = st.text_area("🧬 Plak hier de gensymbolen:", height=180, placeholder="FKBP4\nHSP90AA1\nHSP90AB1\nHSPA8\nSTIP1", key="gen_tekst_wgs")
+            flank = st.number_input("Flank rond het gen voor regulatoire features (bp)", min_value=0, max_value=20000, value=5000, step=1000, key="gen_flank")
+            uploaded_vcf_gen = st.file_uploader("Upload WGS-bestand (.vcf of .vcf.gz)", type=["vcf", "gz"], key="vcf_gen")
+            if st.button("🚀 Start Gen-analyse", type="primary", key="start_genanalyse"):
+                if not uploaded_vcf_gen:
+                    st.error("⚠️ Upload eerst een VCF- of VCF.GZ-bestand.")
+                elif not gen_tekst.strip():
+                    st.error("⚠️ Plak eerst één of meer gensymbolen.")
+                else:
+                    genen = haal_genen_uit_invoer(gen_tekst)
+                    if not genen:
+                        st.error("⚠️ Geen geldige gensymbolen herkend.")
+                    elif len(genen) > 20:
+                        st.error("⚠️ Gebruik maximaal 20 genen per analyse.")
+                    else:
+                        try:
+                            with st.spinner(f"🧬 Gen-analyse uitvoeren voor {len(genen)} gen(en)..."):
+                                kandidaten, niet_gevonden_genen, no_calls = scan_genregios(uploaded_vcf_gen, genen, flank=int(flank))
+                                annotaties = vep_annotaties(kandidaten)
+                                resultaten = bouw_gen_resultaten(kandidaten, annotaties)
+                            st.success("✅ Gen-analyse voltooid!")
+                            c1, c2 = st.columns(2)
+                            c1.metric("Relevante varianten", len(resultaten))
+                            c2.metric("No-calls uitgesloten", no_calls)
+                            if resultaten:
+                                st.dataframe(resultaten, width="stretch", hide_index=True)
+                                csv_tekst = gen_resultaten_naar_csv(resultaten)
+                                st.download_button("⬇️ Download gen-analyse als CSV", data=csv_tekst.encode("utf-8"), file_name="wgs_genanalyse_resultaten.csv", mime="text/csv")
+                            else:
+                                st.info("Er zijn binnen de gekozen genen geen gecallde coding-, splice-, UTR- of regulatoire varianten gevonden die aan de selectie voldoen.")
+                            if niet_gevonden_genen:
+                                st.warning("Voor deze genen kon geen GRCh37-genregio worden opgehaald: " + ", ".join(niet_gevonden_genen))
+                            st.warning("Let op: een positie die niet als variantregel in dit VCF staat, wordt niet automatisch als homozygoot referentie geïnterpreteerd.")
+                        except Exception as fout:
+                            st.error(f"⚠️ De gen-analyse kon niet worden voltooid. Technische melding: {fout}")
 
     else:
-        st.markdown(
-            "📂 Upload het originele ruwe DNA-bestand (.txt of .csv). "
-            "Let op: zet het bestand niet eerst om naar een ander formaat."
-        )
-
-        st.markdown(
-            "De tool zoekt exact op kolom 1 "
-            "(rs4680 matcht **niet** op rs4680899)."
-        )
-
-        uploaded_file = (
-            st.file_uploader(
-                "Upload DNA-bestand",
-                type=[
-                    "txt",
-                    "csv"
-                ]
-            )
-        )
-
-        if st.button(
-            "🚀 Start Analyse",
-            type="primary"
-        ):
+        st.subheader("RS-nummers zoeken")
+        rs_tekst = st.text_area("🔎 Plak hier de RS-nummers (elke opmaak werkt):", height=180, placeholder="rs4680\nrs1801131\nrs12069019, rs76698872\n...")
+        st.markdown("📂 Upload het originele ruwe DNA-bestand (.txt of .csv). Let op: zet het bestand niet eerst om naar een ander formaat.")
+        st.markdown("De tool zoekt exact op kolom 1 (rs4680 matcht **niet** op rs4680899).")
+        uploaded_file = st.file_uploader("Upload DNA-bestand", type=["txt", "csv"])
+        if st.button("🚀 Start Analyse", type="primary"):
             if not uploaded_file:
-                st.error(
-                    "⚠️ Upload eerst een DNA-bestand."
-                )
-
+                st.error("⚠️ Upload eerst een DNA-bestand.")
             elif not rs_tekst.strip():
-                st.error(
-                    "⚠️ Plak eerst RS-nummers."
-                )
-
+                st.error("⚠️ Plak eerst RS-nummers.")
             else:
-                rs_lijst = (
-                    haal_rs_nummers_uit_invoer(
-                        rs_tekst
-                    )
-                )
-
+                rs_lijst = haal_rs_nummers_uit_invoer(rs_tekst)
                 if not rs_lijst:
-                    st.error(
-                        "⚠️ Geen geldige RS-nummers herkend."
-                    )
-
+                    st.error("⚠️ Geen geldige RS-nummers herkend.")
                 else:
-                    with st.spinner(
-                        f"🔬 {len(rs_lijst)} "
-                        "RS-nummers opzoeken..."
-                    ):
-                        gevonden = (
-                            lees_dna_bestand(
-                                uploaded_file,
-                                rs_lijst
-                            )
-                        )
-
-                    toon_resultaten(
-                        gevonden,
-                        rs_lijst,
-                        wgs=False
-                    )
+                    with st.spinner(f"🔬 {len(rs_lijst)} RS-nummers opzoeken..."):
+                        gevonden = lees_dna_bestand(uploaded_file, rs_lijst)
+                    toon_resultaten(gevonden, rs_lijst, wgs=False)
 
 
 if controleer_login():
